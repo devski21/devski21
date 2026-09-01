@@ -1,4 +1,18 @@
-# Cosmic Simulation Engine
+# Relativistic Simulation Tools
+
+Two single-file instruments built on Pygame + NumPy (+ SciPy and Astropy for the
+second). Both run in geometrized units (`G = c = 1`, 1 world unit = 1 pixel), both
+are verified against closed-form results rather than eyeballed, and both hold
+60 FPS — with one documented exception, noted below.
+
+| | |
+|---|---|
+| **`cosmic_engine.py`** | Interactive spacetime sandbox — a deformable coordinate mesh warped by gravity, dark energy and a warp drive. |
+| **`roman_lensing_lab.py`** | Telescope-data pipeline — ingests FITS survey imagery and ray-traces every pixel through an exact GR lens. |
+
+---
+
+# 1. Cosmic Simulation Engine  (`cosmic_engine.py`)
 
 A 2D relativistic spacetime sandbox in Python + Pygame + NumPy. Einstein's gravity,
 a quintessence-driven vacuum, dark matter, tidal disruption and two kinds of
@@ -163,3 +177,133 @@ reproduce — Kerr radii against their analytic forms, RK4 convergence order, th
 bisected out of the effective potential, epicyclic amplification approaching it,
 the dark matter measurement rules, Penrose extraction scaling with spin — plus the
 render benchmark above.
+
+
+---
+
+# 2. Roman Lensing Lab  (`roman_lensing_lab.py`)
+
+A scientific instrument rather than a sandbox: it ingests real panoramic survey
+imagery (FITS) and pushes **every pixel** through an exact general-relativistic
+ray-tracer. The background sky is not a texture — it is the *source plane*, and
+what you see is the image plane produced by solving the lens equation for every
+pixel, every frame.
+
+```bash
+pip install pygame numpy scipy astropy
+python roman_lensing_lab.py                 # autodiscovers a FITS file, else synthesizes one
+python roman_lensing_lab.py --fits my.fits  # use specific data
+python roman_lensing_lab.py --selftest      # 113 analytic checks + benchmark
+```
+
+## Exact light deflection
+
+The bending of light by a mass is **not** `4GM/c²b`. That is the first term of a
+series that fails badly near the hole: at the photon sphere the true deflection
+diverges logarithmically while `4M/b` is a finite 0.77 rad. Since the whole point
+of this instrument is the strong field, it uses the exact Darwin result in terms
+of elliptic integrals (`scipy.special`):
+
+```
+b(r₀) = r₀ / √(1 − 2M/r₀)
+α     = 4√(r₀/Q)·[K(k) − F(ζ,k)] − π ,   Q² = (r₀−2M)(r₀+6M)
+```
+
+Verified three ways: against an independent numerical quadrature of the null
+geodesic (agreement to 8×10⁻¹¹ rad), against Einstein's weak-field limit, and
+against the known second-order coefficient `1 + 15πM/16b` to eight digits. Near
+the photon sphere the self-test confirms the divergence adds exactly `2 ln 10`
+per decade — quadratic because `b` has a *minimum* there.
+
+Elliptic integrals are far too slow per-pixel, so the exact curve is tabulated
+once and evaluated by lookup; beyond the table the post-Newtonian series takes
+over (relative error < 10⁻¹²) rather than clamping to a constant.
+
+## What follows from one scalar function
+
+The thin-lens equation with that exact `α` gives the radial map
+`r_src(r) = r − D_eff·α(r)`, and everything the instrument shows falls out of it:
+
+- **Shadow** at `b_c = 3√3·M = 2.598 r_s` — not the horizon. This is why the EHT
+  image of M87* is noticeably larger than `2 r_s`.
+- **Einstein ring** at the root of `r_src = 0`, solved with `scipy.optimize.brentq`
+  rather than the weak-field guess (they differ by 36% at default settings).
+- **Counter-images for free.** Inside the critical curve `r_src` goes negative,
+  and a negative radius at the same azimuth *is* the inverted image — so lensed
+  arcs appear in pairs with no branch and no special case.
+- **Magnification** `μ⁻¹ = (r_src/r)·(dr_src/dr)`, which diverges on the critical
+  curve and flips sign across it. That sign flip is the parity inversion.
+- **Frame dragging.** Viewed down the spin axis the Kerr deflection is purely
+  azimuthal, giving a twist `∝ D_eff·aM/r³` — the same 1/r³ as Lense-Thirring.
+
+## The data pipeline (Astropy)
+
+Finds a FITS file, takes the first ≥2-D image HDU, median-collapses cubes, and
+parses the WCS. With no file present it **synthesizes** a Roman-like wide field —
+`Sersic2D` galaxies across the de Vaucouleurs-to-exponential range, PSF-convolved
+point sources, a zodiacal gradient, Poisson + read noise — writes it as a real
+FITS file, and reads it back through the same loader. There is no "mock mode"
+branch downstream. Display uses `ZScaleInterval` + `AsinhStretch`.
+
+`PhysicalScale` anchors the pixels to SI with `astropy.constants` and a Planck18
+cosmology, so the HUD reports the true Schwarzschild radius in km and the true
+Einstein angle in µas *alongside* the deliberately exaggerated on-screen ring,
+clearly labelled. The display never pretends to be to scale.
+
+## The contamination experiment, quantified
+
+Lensing arcs are a faint *contrast* modulation, so detectability is a
+signal-to-noise question:
+
+```
+SNR = σ_arc / √(σ_read² + σ_contamination²)
+```
+
+Switching on a visible-light sensor injects a large additive photon pedestal. It
+does not paint over the arcs — it **buries** them, while the lensing physics
+continues untouched. Measured live on the traced pixels:
+
+| Condition | Arc SNR | Verdict |
+|---|---|---|
+| Deep underground shielding | 16.0 | DETECTED |
+| Unshielded ambient | 4.9 | MARGINAL |
+| Laser sensor active | 0.35 | UNMEASURABLE |
+
+Under shielding all light-rendering vectors are cut and the view switches to the
+false-colour **magnification map** — `|log₁₀|μ||`, so undistorted sky is black and
+only the geometry shows, with the critical curve picked out and parity encoded in
+hue. Dark matter becomes visible there and nowhere else. A decohered particle is
+never deleted: it still gravitates, it is merely unmeasurable.
+
+## Performance
+
+The per-frame work is one integer gather. Three things make that possible:
+
+1. **Separation of what changes.** The lens map depends on mass, spin, depth and
+   camera — none of which change on a typical frame — so it is cached. Only the
+   cosmological scale factor varies, and that is a scalar multiply.
+2. **Packed pixels.** The source is stored as one `uint32` per pixel in exactly a
+   32-bit surface's layout: one contiguous 4-byte gather instead of three strided
+   byte gathers (~5× measured), and it blits with no conversion.
+3. **Mip-mapped source filtering.** Near the shadow the map compresses a huge
+   range of source radius into a thin annulus, so one output pixel covers many
+   source pixels. Pre-filtered levels are selected per pixel by a single integer
+   offset — motivated by the detector integrating over its solid angle, not by
+   graphics convention.
+
+Measured headless: **98 FPS** default scene, **72 FPS** worst case (22 bodies,
+warp bubble and dust fog active). During *continuous* camera motion the whole
+deflection field must be rebuilt every frame, which runs at **51 FPS** — the one
+sub-60 path, and only while actively panning, zooming or chasing the ship.
+
+Everything else — RK4 dynamics, the Paczyński-Wiita force law, Kerr boundaries,
+the atomic-equilibrium collapse ladder, spaghettification, Penrose superradiance,
+the Alcubierre bubble and the dual clocks — carries over from the engine above,
+with the same verification.
+
+## Verification
+
+`--selftest` runs 113 checks against closed-form results, including everything
+above plus: `r_s(1 M☉) = 2.953 km` from `astropy.constants`, the shadow being
+*exactly* the `b < b_c` disc, radial × tangential stretch reproducing `1/|μ|`,
+and a 3-D FITS cube round-tripping through the loader.
